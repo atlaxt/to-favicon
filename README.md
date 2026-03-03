@@ -18,10 +18,8 @@ npx @atlaxt/favicon logo.png
 
 Output:
 
-```
+```bash
   Reading  →  logo.png
-  Size     →  512×512px
-  Sizes    →  16×16, 32×32, 48×48
   Output   →  /your/project/public/favicon.ico
 
   ✔  favicon.ico ready!
@@ -35,9 +33,9 @@ The `.ico` file embeds three sizes that cover all major browsers and devices:
 
 | Size  | Used by |
 |-------|---------|
-| 16×16 | Browser tab, bookmarks bar |
+| 16×16 | Browser tab, bookmarks bar  |
 | 32×32 | Taskbar shortcut, tab title |
-| 48×48 | Windows site icons |
+| 48×48 | Windows site icons          |
 
 ## Requirements
 

@@ -94,16 +94,6 @@ async function main() {
   console.log('');
   log(`Reading  →  ${path.basename(inputPath)}`);
 
-  let metadata;
-  try {
-    metadata = await sharp(inputPath).metadata();
-  } catch (err) {
-    fail(`Could not read image: ${err.message}`);
-  }
-
-  log(`Size     →  ${metadata.width}×${metadata.height}px`);
-  log(`Sizes    →  ${SIZES.map(s => `${s}×${s}`).join(', ')}`);
-
   let buffers;
   try {
     buffers = await Promise.all(
