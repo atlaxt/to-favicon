@@ -2,6 +2,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const readline = require('readline');
 const sharp = require('sharp');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -17,10 +18,11 @@ function log(msg) {
 
 // ── args ──────────────────────────────────────────────────────────────────────
 
-const input = process.argv[2];
+async function resolveInput() {
+  let input = process.argv[2];
 
-if (!input || input === '--help' || input === '-h') {
-  console.log(`
+  if (input === '--help' || input === '-h') {
+    console.log(`
   @atlaxt/favicon — PNG → favicon.ico converter
 
   Usage:
@@ -33,20 +35,22 @@ if (!input || input === '--help' || input === '-h') {
   Output:
     Saves to public/ if it exists, otherwise current working directory.
 `);
-  process.exit(input ? 0 : 1);
-}
+    process.exit(0);
+  }
 
-// ── validate input ────────────────────────────────────────────────────────────
+  if (!input) {
+    console.log('');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    input = await new Promise(resolve => {
+      rl.question('  Enter the path or drag the image here: ', answer => {
+        rl.close();
+        resolve(answer.trim());
+      });
+    });
+    if (!input) fail('No path provided.');
+  }
 
-const inputPath = path.resolve(process.cwd(), input);
-
-if (!fs.existsSync(inputPath)) {
-  fail(`File not found: ${inputPath}`);
-}
-
-const ext = path.extname(inputPath).toLowerCase();
-if (ext !== '.png') {
-  fail(`Only PNG files are supported. Received: ${ext || '(no extension)'}`);
+  return input;
 }
 
 // ── ICO builder (PNG-embedded format) ─────────────────────────────────────────
@@ -84,13 +88,25 @@ function buildIco(pngBuffers) {
 
 const SIZES = [16, 32, 48];
 
-const publicDir = path.join(process.cwd(), 'public');
-const outputDir = fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()
-  ? publicDir
-  : process.cwd();
-const outputPath = path.join(outputDir, 'favicon.ico');
-
 async function main() {
+  const input = await resolveInput();
+  const inputPath = path.resolve(process.cwd(), input);
+
+  if (!fs.existsSync(inputPath)) {
+    fail(`File not found: ${inputPath}`);
+  }
+
+  const ext = path.extname(inputPath).toLowerCase();
+  if (ext !== '.png') {
+    fail(`Only PNG files are supported. Received: ${ext || '(no extension)'}`);
+  }
+
+  const publicDir = path.join(process.cwd(), 'public');
+  const outputDir = fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()
+    ? publicDir
+    : process.cwd();
+  const outputPath = path.join(outputDir, 'favicon.ico');
+
   console.log('');
   log(`Reading  →  ${path.basename(inputPath)}`);
 
