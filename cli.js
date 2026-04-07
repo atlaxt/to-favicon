@@ -3,6 +3,8 @@
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
+const https = require('https');
+const http = require('http');
 const sharp = require('sharp');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -23,34 +25,124 @@ async function resolveInput() {
 
   if (input === '--help' || input === '-h') {
     console.log(`
-  @atlaxt/favicon — PNG → favicon.ico converter
+  @atlaxt/favicon — image → favicon files converter
 
   Usage:
-    npx @atlaxt/favicon <path-to-png>
+    npx @atlaxt/favicon <path-to-image>
+    npx @atlaxt/favicon <url>
 
   Example:
     npx @atlaxt/favicon logo.png
-    npx @atlaxt/favicon ./assets/icon.png
+    npx @atlaxt/favicon logo.svg
+    npx @atlaxt/favicon https://example.com
 
   Output:
+    favicon.ico, favicon.png, apple-touch-icon.png
     Saves to public/ if it exists, otherwise current working directory.
 `);
     process.exit(0);
   }
 
-  if (!input) {
-    console.log('');
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    input = await new Promise(resolve => {
-      rl.question('  Enter the path or drag the image here: ', answer => {
-        rl.close();
-        resolve(answer.trim());
-      });
-    });
-    if (!input) fail('No path provided.');
+  if (input) {
+    return input.trim().replace(/^['"]|['"]$/g, '');
   }
 
+  console.log('');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  input = await new Promise(resolve => {
+    rl.question('  Enter the path, URL, or drag the image here: ', answer => {
+      rl.close();
+      resolve(answer.trim().replace(/^['"]|['"]$/g, ''));
+    });
+  });
+  if (!input) fail('No path provided.');
+
   return input;
+}
+
+// ── URL fetch ─────────────────────────────────────────────────────────────────
+
+function fetchBuffer(url, depth = 0) {
+  if (depth > 5) return Promise.reject(new Error('Too many redirects'));
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    client.get(url, { headers: { 'User-Agent': 'to-favicon/1.0' } }, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchBuffer(new URL(res.headers.location, url).href, depth + 1).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// If the buffer is an ICO file, extract the largest embedded image from it.
+// Modern ICOs embed PNG data directly, which sharp can process.
+function extractFromIco(buf) {
+  if (buf.length < 6) return null;
+  if (buf.readUInt16LE(0) !== 0 || buf.readUInt16LE(2) !== 1) return null;
+  const count = buf.readUInt16LE(4);
+  let bestSize = 0, bestBuf = null;
+  for (let i = 0; i < count; i++) {
+    const entry = 6 + i * 16;
+    if (entry + 16 > buf.length) break;
+    const w = buf.readUInt8(entry) || 256;
+    const size = buf.readUInt32LE(entry + 8);
+    const dataOffset = buf.readUInt32LE(entry + 12);
+    if (dataOffset + size > buf.length) break;
+    if (w >= bestSize) {
+      bestSize = w;
+      bestBuf = buf.slice(dataOffset, dataOffset + size);
+    }
+  }
+  return bestBuf;
+}
+
+async function fetchFaviconFromPage(pageUrl) {
+  log(`Fetching page  →  ${pageUrl}`);
+  let html;
+  try {
+    const buf = await fetchBuffer(pageUrl);
+    html = buf.toString('utf8');
+  } catch (err) {
+    fail(`Could not fetch page: ${err.message}`);
+  }
+
+  const base = new URL(pageUrl);
+
+  // Collect all icon link hrefs
+  const iconTagRe = /<link[^>]*\brel=["'][^"']*\bicon\b[^"']*["'][^>]*>/gi;
+  const hrefValRe = /\bhref=["']([^"']+)["']/i;
+  const hrefs = [];
+  let m;
+  while ((m = iconTagRe.exec(html)) !== null) {
+    const hm = m[0].match(hrefValRe);
+    if (hm) hrefs.push(hm[1]);
+  }
+
+  // prefer PNG/SVG/WebP over ICO
+  const preferred = hrefs.find(h => /\.(png|svg|webp|jpg|jpeg)(\?|#|$)/i.test(h));
+  const faviconPath = preferred || hrefs[0] || '/favicon.ico';
+  const faviconUrl = new URL(faviconPath, base).href;
+
+  log(`Found favicon  →  ${faviconUrl}`);
+  let imgBuf;
+  try {
+    imgBuf = await fetchBuffer(faviconUrl);
+  } catch (err) {
+    fail(`Could not fetch favicon: ${err.message}`);
+  }
+
+  // If it's an ICO, extract the largest embedded image for sharp to process
+  if (imgBuf.length >= 4 && imgBuf.readUInt16LE(0) === 0 && imgBuf.readUInt16LE(2) === 1) {
+    const extracted = extractFromIco(imgBuf);
+    if (extracted) return extracted;
+  }
+
+  return imgBuf;
 }
 
 // ── ICO builder (PNG-embedded format) ─────────────────────────────────────────
@@ -86,36 +178,50 @@ function buildIco(pngBuffers) {
 
 // ── convert ───────────────────────────────────────────────────────────────────
 
-const SIZES = [16, 32, 48];
+const ICO_SIZES = [16, 32, 48];
 
 async function main() {
   const input = await resolveInput();
-  const inputPath = path.resolve(process.cwd(), input);
 
-  if (!fs.existsSync(inputPath)) {
-    fail(`File not found: ${inputPath}`);
-  }
+  const isUrl = /^https?:\/\//i.test(input);
 
-  const ext = path.extname(inputPath).toLowerCase();
-  if (ext !== '.png') {
-    fail(`Only PNG files are supported. Received: ${ext || '(no extension)'}`);
+  let sharpInput;
+
+  if (isUrl) {
+    console.log('');
+    sharpInput = await fetchFaviconFromPage(input);
+  } else {
+    const inputPath = path.resolve(process.cwd(), input);
+
+    if (!fs.existsSync(inputPath)) {
+      fail(`File not found: ${inputPath}`);
+    }
+
+    const ext = path.extname(inputPath).toLowerCase();
+    const SUPPORTED = ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.tiff', '.tif', '.gif', '.svg'];
+    if (!SUPPORTED.includes(ext)) {
+      fail(`Unsupported format: ${ext || '(no extension)'}. Supported: ${SUPPORTED.join(', ')}`);
+    }
+
+    sharpInput = inputPath;
+    console.log('');
+    log(`Reading  →  ${path.basename(inputPath)}`);
   }
 
   const publicDir = path.join(process.cwd(), 'public');
   const outputDir = fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()
     ? publicDir
     : process.cwd();
-  const outputPath = path.join(outputDir, 'favicon.ico');
 
-  console.log('');
-  log(`Reading  →  ${path.basename(inputPath)}`);
+  const bg = { r: 0, g: 0, b: 0, alpha: 0 };
 
-  let buffers;
+  // favicon.ico (16, 32, 48)
+  let icoBuffers;
   try {
-    buffers = await Promise.all(
-      SIZES.map(size =>
-        sharp(inputPath)
-          .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    icoBuffers = await Promise.all(
+      ICO_SIZES.map(size =>
+        sharp(sharpInput)
+          .resize(size, size, { fit: 'contain', background: bg })
           .png()
           .toBuffer()
       )
@@ -124,12 +230,32 @@ async function main() {
     fail(`Resize failed: ${err.message}`);
   }
 
-  const ico = buildIco(buffers);
+  fs.writeFileSync(path.join(outputDir, 'favicon.ico'), buildIco(icoBuffers));
+  log(`Output   →  ${path.join(outputDir, 'favicon.ico')}`);
 
-  fs.writeFileSync(outputPath, ico);
+  // favicon.png (32x32)
+  try {
+    await sharp(sharpInput)
+      .resize(32, 32, { fit: 'contain', background: bg })
+      .png()
+      .toFile(path.join(outputDir, 'favicon.png'));
+  } catch (err) {
+    fail(`favicon.png failed: ${err.message}`);
+  }
+  log(`Output   →  ${path.join(outputDir, 'favicon.png')}`);
 
-  log(`Output   →  ${outputPath}`);
-  console.log(`\n  ✔  favicon.ico ready!\n`);
+  // apple-touch-icon.png (180x180)
+  try {
+    await sharp(sharpInput)
+      .resize(180, 180, { fit: 'contain', background: bg })
+      .png()
+      .toFile(path.join(outputDir, 'apple-touch-icon.png'));
+  } catch (err) {
+    fail(`apple-touch-icon.png failed: ${err.message}`);
+  }
+  log(`Output   →  ${path.join(outputDir, 'apple-touch-icon.png')}`);
+
+  console.log(`\n  ✔  Done!\n`);
 }
 
 main().catch(err => fail(err.message));

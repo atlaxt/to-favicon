@@ -1,6 +1,6 @@
 {
   "name": "@atlaxt/to-favicon",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Convert any PNG to a multi-size favicon.ico with a single command",
   "keywords": [
     "favicon",
